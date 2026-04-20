@@ -1,11 +1,11 @@
-# FBEditor Linux v0.1.0
+# FBEditor Linux v0.2.0
 
 A FreeBASIC IDE for Linux 64-bit, written entirely in FreeBASIC using the Window9 GUI library. Ported from the original [FBEditor for Windows](https://github.com/ronen-blumberg/FBEditor) (VB.NET/.NET Framework 4.8).
 
 ![Platform](https://img.shields.io/badge/Platform-Linux_64--bit-blue)
 ![Language](https://img.shields.io/badge/Language-FreeBASIC-green)
 ![GUI](https://img.shields.io/badge/GUI-Window9-orange)
-![Lines](https://img.shields.io/badge/Lines_of_Code-3.1K-brightgreen)
+![Lines](https://img.shields.io/badge/Lines_of_Code-3.7K-brightgreen)
 
 ---
 
@@ -49,8 +49,14 @@ Launch the IDE and open a FreeBASIC source file to see:
 - **Zoom in/out** (Ctrl+NumPad+/- or View menu), reset to default (Ctrl+0)
 - **Editor font chooser** — pick any installed system font via View > Editor Font
 - **Undo/Redo** — Ctrl+Z / Ctrl+Y (handled natively by GtkTextView)
+- **Cut/Copy/Paste/Select All** — Ctrl+X / Ctrl+C / Ctrl+V / Ctrl+A (native GTK clipboard)
+- **Indent / Unindent selection** — Ctrl+] / Ctrl+[ on the current line or multi-line selection
+- **Current-line highlight** — subtly shades the line under the cursor
+- **Bracket matching** — highlights the matching `()`, `[]`, `{}` when the cursor sits on one
+- **Insert / Overwrite toggle** — Ins key toggles modes; status bar shows `INS` / `OVR`
 - **Drag & drop** — drop `.bas` or `.bi` files from your file manager onto the editor to open them
 - **Smooth scrolling** — non-blocking event loop with deferred UI updates for responsive scrolling
+- **Responsive builds** — the IDE pumps GTK events while `fbc` runs so the window stays live
 
 ### Multi-File Editing
 
@@ -137,10 +143,21 @@ All settings are saved to `~/.config/fbeditor/` and restored on next launch:
 - Window position and size
 - All splitter positions (project tree width, outline height, output panel height)
 - Editor font name and size
-- Dark/light theme preference
+- Dark/light theme, word-wrap, auto-indent preferences
 - FBC and GDB compiler paths
 - Build options (target type, optimization, debug info, etc.)
 - Recent files list (File > Recent Files submenu)
+- **Open file set** — all files that were open are reopened on next launch, with the previously-active file selected
+
+### Preferences
+
+Central **Preferences** dialog (View > Preferences... or `Ctrl+,`) for:
+- Tab width
+- Editor font name and size
+- Dark theme on/off
+- Word wrap on/off
+- Auto-indent on Enter on/off
+- Show line numbers (persisted)
 
 ### Status Bar
 
@@ -173,6 +190,8 @@ Three-section status bar showing:
 |---|---|
 | Ctrl+Z | Undo |
 | Ctrl+Y | Redo |
+| Ctrl+X / Ctrl+C / Ctrl+V | Cut / Copy / Paste |
+| Ctrl+A | Select All |
 | Ctrl+Space | Auto-Complete |
 | Ctrl+F | Find |
 | Ctrl+H | Find & Replace |
@@ -182,6 +201,9 @@ Three-section status bar showing:
 | Ctrl+L | Select Line |
 | Ctrl+D | Duplicate Line |
 | Ctrl+Shift+K | Delete Line |
+| Ctrl+] / Ctrl+[ | Indent / Unindent selection |
+| Ctrl+, | Preferences |
+| Ins | Toggle Insert / Overwrite |
 | Ctrl+NumPad+ | Zoom In |
 | Ctrl+NumPad- | Zoom Out |
 | Ctrl+0 | Reset Zoom |
@@ -269,11 +291,11 @@ FBEditor-linux/
 ├── CLAUDE.md                  AI assistant context file
 ├── fbeditor                   Compiled binary (after build)
 ├── src/
-│   └── main.bas               Main application (2,536 lines)
+│   └── main.bas               Main application (~3,000 lines)
 ├── include/
-│   ├── types.bi               Core data types (68 lines)
-│   ├── syntax.bi              Syntax highlighting engine (298 lines)
-│   └── outline.bi             Code outline parser (207 lines)
+│   ├── types.bi               Core data types
+│   ├── syntax.bi              Syntax highlighting engine
+│   └── outline.bi             Code outline parser
 └── test/
     ├── hello.bas              Simple test program
     └── syntax_test.bas        Syntax highlighting test file
@@ -345,6 +367,7 @@ All configuration is stored in `~/.config/fbeditor/`:
 |---|---|
 | `settings.ini` | All IDE settings (window state, editor prefs, build options, compiler paths) |
 | `recent.txt` | Recent files list (one path per line, up to 10) |
+| `session.txt` | List of files that were open at last exit + active-file index |
 
 ### settings.ini Format
 
@@ -405,6 +428,27 @@ Y=50
 ---
 
 ## Version History
+
+### v0.2.0 (April 2026)
+
+**New features:**
+- Cut / Copy / Paste / Select All via native GTK clipboard (menu + shortcuts)
+- Indent / Unindent selection (Ctrl+]/Ctrl+[) on current line or multi-line selection
+- Current-line background highlighting (theme-aware)
+- Bracket matching highlight for `()`, `[]`, `{}` — respects strings and line comments
+- Insert / Overwrite mode toggle with `Ins` key; status bar shows `INS` / `OVR`
+- **Session restore** — reopens previously-open files and restores the active file
+- **Preferences dialog** (Ctrl+,) — tab width, font, dark theme, word wrap, auto-indent
+- About dialog now shows live FBC/GDB versions, open-file counts, and config path
+- Persist word-wrap and auto-indent settings across sessions
+- Exit via File > Exit now prompts for unsaved changes (previously closed without asking)
+- Responsive UI during builds — pumps GTK events while `fbc` is running
+
+**Bug fixes:**
+- **Save All** (Ctrl+Shift+S) no longer silently discards unsaved edits on the active file
+- **Find Next / Find Previous** no longer get stuck re-finding the current selection; status bar reports wrap vs. line number
+- **Replace One** only replaces when the current selection truly matches the search text, preventing accidental insertions
+- Comment / Uncomment block now handles selections that don't end in a newline
 
 ### v0.1.0 (April 2026)
 - Initial Linux port from VB.NET FBEditor

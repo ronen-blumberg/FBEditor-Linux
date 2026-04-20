@@ -6,7 +6,7 @@
 
 ' Application constants
 Const APP_NAME = "FBEditor"
-Const APP_VERSION = "0.1.0"
+Const APP_VERSION = "0.2.0"
 Const APP_AUTHOR = "Ronen Blumberg"
 Const MAX_RECENT_FILES = 10
 Const MAX_OPEN_FILES = 32

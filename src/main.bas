@@ -161,6 +161,17 @@ Enum GadgetID
     giBldLibPaths
     giBldOK
     giBldCancel
+
+    ' Preferences dialog gadgets
+    giPrefTabWidth = 95
+    giPrefDarkTheme
+    giPrefWordWrap
+    giPrefAutoIndent
+    giPrefShowLineNums
+    giPrefFontName
+    giPrefFontSize
+    giPrefOK
+    giPrefCancel
 End Enum
 
 ' ============================================================
@@ -192,6 +203,11 @@ Enum MenuID
     mnuEditSelectLine
     mnuEditDuplicateLine
     mnuEditDeleteLine
+    mnuEditIndent
+    mnuEditUnindent
+    mnuEditMoveLineUp
+    mnuEditMoveLineDown
+    mnuEditInsertMode
 
     ' View menu
     mnuViewDarkTheme = 350
@@ -201,6 +217,7 @@ Enum MenuID
     mnuViewZoomIn
     mnuViewZoomOut
     mnuViewZoomReset
+    mnuViewPreferences
 
     ' Build menu
     mnuBuildCompile = 300
@@ -257,6 +274,9 @@ Enum ShortcutID
     kbMoveLineDown
     kbSaveAll
     kbDeleteLine
+    kbIndent
+    kbUnindent
+    kbPreferences
 End Enum
 
 ' ============================================================
@@ -275,6 +295,7 @@ Const LIGHT_FG     = Bgr(0, 0, 0)
 Dim Shared hWin As HWND                       ' Main window handle
 Dim Shared hFindWin As HWND                   ' Find/Replace window
 Dim Shared hBuildOptWin As HWND               ' Build options window
+Dim Shared hPrefWin As HWND                   ' Preferences window
 Dim Shared gSettings As EditorSettings
 Dim Shared gBuild As BuildSettings
 Dim Shared gFiles(MAX_OPEN_FILES - 1) As OpenFileInfo
@@ -292,6 +313,7 @@ Dim Shared gStatusDirty As Integer = 0  ' Deferred status bar update flag
 Dim Shared gModifyDirty As Integer = 0  ' Deferred modify check flag
 Dim Shared gHighlightDirty As Integer = 0  ' Deferred syntax highlight flag
 Dim Shared gWordWrap As Integer = 0
+Dim Shared gAutoIndent As Integer = -1
 Dim Shared gFontSize As Long = 11
 Dim Shared gFontName As String
 Dim Shared gWinX As Long = 50
@@ -322,6 +344,9 @@ Const giAutoList = 90                      ' Listbox gadget ID in popup
 Dim Shared gDbgRunning As Integer = 0
 Dim Shared gDbgPaused As Integer = 0
 Dim Shared gDbgPID As Long = 0
+
+' Insert/overwrite mode
+Dim Shared gOvertype As Integer = 0
 
 ' ============================================================
 ' Forward Declarations
@@ -381,6 +406,23 @@ Declare Sub AppendOutput(txt As String)
 Declare Sub ClearOutput()
 Declare Sub AppendDebugOutput(txt As String)
 Declare Sub SetStatusText(txt As String)
+Declare Sub DoEditorCut()
+Declare Sub DoEditorCopy()
+Declare Sub DoEditorPaste()
+Declare Sub DoEditorSelectAll()
+Declare Sub DoEditorUndo()
+Declare Sub DoEditorRedo()
+Declare Sub DoIndentSelection(unindent As Integer)
+Declare Sub ToggleInsertOverwrite()
+Declare Sub SaveSession()
+Declare Sub LoadSession()
+Declare Sub ShowPreferences()
+Declare Sub ApplyPreferences()
+Declare Sub ClosePreferences()
+Declare Sub UpdateCurrentLineHighlight()
+Declare Sub ResetCurLineTag()
+Declare Sub ResetBracketTag()
+Declare Sub UpdateBracketMatch()
 Declare Sub RefreshOutline()
 Declare Sub GoToOutlineItem()
 Declare Sub ShowBuildOptions()
@@ -453,6 +495,10 @@ Sub InitSettings()
         If Len(v) > 0 Then gFontSize = Val(v)
         v = GetConfigValue(cfg, "Editor", "FontName")
         If Len(v) > 0 Then gFontName = v
+        v = GetConfigValue(cfg, "Editor", "WordWrap")
+        If Len(v) > 0 Then gWordWrap = Val(v)
+        v = GetConfigValue(cfg, "Editor", "AutoIndent")
+        If Len(v) > 0 Then gAutoIndent = Val(v)
 
         v = GetConfigValue(cfg, "Window", "X")
         If Len(v) > 0 Then gWinX = Val(v)
@@ -489,6 +535,8 @@ Sub SaveSettings()
     SetConfigValue(cfg, "Editor", "DarkTheme", Str(gSettings.DarkTheme))
     SetConfigValue(cfg, "Editor", "FontSize", Str(gFontSize))
     If Len(gFontName) > 0 Then SetConfigValue(cfg, "Editor", "FontName", gFontName)
+    SetConfigValue(cfg, "Editor", "WordWrap", Str(gWordWrap))
+    SetConfigValue(cfg, "Editor", "AutoIndent", Str(gAutoIndent))
 
     ' Save window position and size
     SetConfigValue(cfg, "Window", "X", Str(Windowx(hWin)))
@@ -640,11 +688,11 @@ Sub CreateMenuBar()
     Menuitem(mnuEditUndo, mEdit, "Undo                Ctrl+Z")
     Menuitem(mnuEditRedo, mEdit, "Redo                Ctrl+Y")
     Menuitem(0, mEdit, "-")
-    Menuitem(mnuEditCut, mEdit, "Cut")
-    Menuitem(mnuEditCopy, mEdit, "Copy")
-    Menuitem(mnuEditPaste, mEdit, "Paste")
+    Menuitem(mnuEditCut, mEdit, "Cut                   Ctrl+X")
+    Menuitem(mnuEditCopy, mEdit, "Copy                 Ctrl+C")
+    Menuitem(mnuEditPaste, mEdit, "Paste                Ctrl+V")
     Menuitem(0, mEdit, "-")
-    Menuitem(mnuEditSelectAll, mEdit, "Select All")
+    Menuitem(mnuEditSelectAll, mEdit, "Select All         Ctrl+A")
     Menuitem(0, mEdit, "-")
     Menuitem(mnuEditComment, mEdit, "Comment Block       Ctrl+/")
     Menuitem(mnuEditUncomment, mEdit, "Uncomment Block")
@@ -656,6 +704,13 @@ Sub CreateMenuBar()
     Menuitem(mnuEditSelectLine, mEdit, "Select Line         Ctrl+L")
     Menuitem(mnuEditDuplicateLine, mEdit, "Duplicate Line    Ctrl+D")
     Menuitem(mnuEditDeleteLine, mEdit, "Delete Line          Ctrl+Shift+K")
+    Menuitem(mnuEditMoveLineUp, mEdit, "Move Line Up       Ctrl+Shift+Up")
+    Menuitem(mnuEditMoveLineDown, mEdit, "Move Line Down    Ctrl+Shift+Down")
+    Menuitem(0, mEdit, "-")
+    Menuitem(mnuEditIndent, mEdit, "Indent Selection    Ctrl+]")
+    Menuitem(mnuEditUnindent, mEdit, "Unindent Selection Ctrl+[")
+    Menuitem(0, mEdit, "-")
+    Menuitem(mnuEditInsertMode, mEdit, "Toggle Insert/Overwrite  Ins")
 
     ' ---- View ----
     mView = Menutitle(hMenu, "View")
@@ -668,6 +723,8 @@ Sub CreateMenuBar()
     Menuitem(mnuViewZoomReset, mView, "Reset Zoom            Ctrl+0")
     Menuitem(0, mView, "-")
     Menuitem(mnuViewRefreshOutline, mView, "Refresh Outline        F4")
+    Menuitem(0, mView, "-")
+    Menuitem(mnuViewPreferences, mView, "Preferences...           Ctrl+,")
 
     ' ---- Build ----
     mBuild = Menutitle(hMenu, "Build")
@@ -725,6 +782,10 @@ Sub CreateMenuBar()
     Addkeyboardshortcut(hWin, FCONTROL, VK_D, kbDuplicateLine)
     Addkeyboardshortcut(hWin, FCONTROL Or FSHIFT, VK_S, kbSaveAll)
     Addkeyboardshortcut(hWin, FCONTROL Or FSHIFT, VK_K, kbDeleteLine)
+    ' Ctrl+] = 0xDD in Windows VK codes; pass literal
+    Addkeyboardshortcut(hWin, FCONTROL, &hDD, kbIndent)       ' Ctrl+]
+    Addkeyboardshortcut(hWin, FCONTROL, &hDB, kbUnindent)     ' Ctrl+[
+    Addkeyboardshortcut(hWin, FCONTROL, &hBC, kbPreferences)  ' Ctrl+,
 End Sub
 
 Sub CreateToolbarUI()
@@ -828,8 +889,9 @@ Sub SetupStatusBar()
     Usegadgetlist(hWin)
     Statusbargadget(giStatusBar, "Ready")
     Setstatusbarfield(giStatusBar, 0, 500, "Ready")
-    Setstatusbarfield(giStatusBar, 1, 150, "Ln: 1  Col: 1")
-    Setstatusbarfield(giStatusBar, 2, 100, "UTF-8")
+    Setstatusbarfield(giStatusBar, 1, 280, "Ln: 1  Col: 1")
+    Setstatusbarfield(giStatusBar, 2, 60, "INS")
+    Setstatusbarfield(giStatusBar, 3, 80, "UTF-8")
 End Sub
 
 Sub ResizeInternalGadgets()
@@ -1100,7 +1162,8 @@ Sub UpdateStatusBar()
         End If
 
         If gFiles(gActiveFile).IsModified Then info += "  [*]"
-        Setstatusbarfield(giStatusBar, 1, 300, info)
+        Setstatusbarfield(giStatusBar, 1, 280, info)
+        Setstatusbarfield(giStatusBar, 2, 60, IIf(gOvertype, "OVR", "INS"))
     End If
 End Sub
 
@@ -1166,7 +1229,7 @@ Sub DoFindNext(searchForward As Integer)
     gLastFindText = searchText
 
     Dim As String edText = Getgadgettext(giEditor)
-    Dim As Long curPos = Getcurrentindexchareditor(giEditor)
+    Dim As Long curPos = Getcurrentindexchareditor(giEditor)  ' 0-based
 
     Dim As String haystack = edText
     Dim As String needle = searchText
@@ -1175,55 +1238,95 @@ Sub DoFindNext(searchForward As Integer)
         needle = LCase(needle)
     End If
 
-    Dim As Long foundPos = 0
+    ' Skip past any currently-selected match so "Next" actually advances
+    Dim As String selText = Getselecttexteditorgadget(giEditor)
+    Dim As Long selLen = Len(selText)
+
+    Dim As Long foundPos = 0  ' 1-based InStr result
+    Dim As Integer didWrap = 0
+
     If searchForward Then
-        foundPos = InStr(curPos + 2, haystack, needle)
-        If foundPos = 0 Then foundPos = InStr(1, haystack, needle) ' wrap
+        ' Start searching just past current cursor (or selection end)
+        Dim As Long startAt = curPos + 1  ' convert 0-based to 1-based start
+        foundPos = InStr(startAt, haystack, needle)
+        If foundPos = 0 Then
+            foundPos = InStr(1, haystack, needle)
+            didWrap = -1
+        End If
     Else
-        ' Search backward
+        ' Search backward: cursor should land before the current selection start
+        Dim As Long searchEnd = curPos - selLen  ' 0-based start of selection
+        If searchEnd < 0 Then searchEnd = 0
         Dim As Long fPos = 0, lastFound = 0
         Do
             fPos = InStr(fPos + 1, haystack, needle)
-            If fPos > 0 AndAlso fPos < curPos Then lastFound = fPos
-        Loop While fPos > 0 AndAlso fPos < curPos
+            If fPos > 0 AndAlso fPos <= searchEnd Then
+                lastFound = fPos
+            Else
+                Exit Do
+            End If
+        Loop
         foundPos = lastFound
         If foundPos = 0 Then
-            ' Wrap from end
-            fPos = InStr(curPos + 1, haystack, needle)
-            Do While fPos > 0
-                lastFound = fPos
+            ' Wrap: find last occurrence in the whole text
+            fPos = 0
+            Do
                 fPos = InStr(fPos + 1, haystack, needle)
+                If fPos > 0 Then lastFound = fPos Else Exit Do
             Loop
             foundPos = lastFound
+            If foundPos > 0 Then didWrap = -1
         End If
     End If
 
     If foundPos > 0 Then
-        Setselecttexteditorgadget(giEditor, foundPos - 1, foundPos - 1 + Len(searchText))
+        Dim As Long selStart = foundPos - 1
+        Dim As Long selEnd = selStart + Len(searchText)
+        Setselecttexteditorgadget(giEditor, selStart, selEnd)
         ' Scroll to line
-        Dim As Long ln = Linefromchareditor(giEditor, foundPos - 1)
+        Dim As Long ln = Linefromchareditor(giEditor, selStart)
         Dim As Long firstVis = Getfirstvisiblelineeditor(giEditor)
-        If ln < firstVis OrElse ln > firstVis + 30 Then
-            Linescrolleditor(giEditor, ln - firstVis - 10)
+        If ln < firstVis + 3 OrElse ln > firstVis + 30 Then
+            Dim As Long target = ln - 5
+            If target < 0 Then target = 0
+            Linescrolleditor(giEditor, target - firstVis)
         End If
-        SetStatusText("Found at position " + Str(foundPos))
+        If didWrap Then
+            SetStatusText("Wrapped search — line " + Str(ln + 1))
+        Else
+            SetStatusText("Found at line " + Str(ln + 1))
+        End If
     Else
         SetStatusText("Not found: " + searchText)
-        Messbox("Find", "Text not found: " + searchText)
     End If
 End Sub
 
 Sub DoReplaceOne()
     If hFindWin = 0 Then Return
+    Dim As String searchText = Getgadgettext(giFindText)
     Dim As String replText = Getgadgettext(giReplaceText)
+    gFindMatchCase = Getgadgetstate(giFindMatchCase)
+    If Len(searchText) = 0 Then Return
+    gLastFindText = searchText
+
     Dim As String selText = Getselecttexteditorgadget(giEditor)
 
-    If Len(selText) > 0 Then
-        ' Replace selection with replacement text
+    ' Only replace when the current selection matches the search text
+    Dim As Integer matches = 0
+    If Len(selText) > 0 AndAlso Len(selText) = Len(searchText) Then
+        If gFindMatchCase Then
+            matches = (selText = searchText)
+        Else
+            matches = (LCase(selText) = LCase(searchText))
+        End If
+    End If
+
+    If matches Then
         Pasteeditor(giEditor, replText)
         CheckEditorModified()
+        gHighlightDirty = -1
     End If
-    DoFindNext(-1) ' Find next occurrence
+    DoFindNext(-1) ' Move to next occurrence
 End Sub
 
 Sub DoReplaceAll()
@@ -1292,8 +1395,6 @@ End Sub
 ' Comment / Uncomment Block
 ' ============================================================
 Sub DoCommentBlock()
-    Dim As String edText = Getgadgettext(giEditor)
-    Dim As Long selStart = 0, selEnd = 0
     Dim As String selText = Getselecttexteditorgadget(giEditor)
 
     If Len(selText) = 0 Then
@@ -1307,22 +1408,21 @@ Sub DoCommentBlock()
         ' Comment each selected line
         Dim As String result = ""
         Dim As Long i = 1
-        Do
+        Dim As Long selLen = Len(selText)
+        Do While i <= selLen
             Dim As Long nlPos = InStr(i, selText, Chr(10))
-            Dim As String ln
             If nlPos > 0 Then
-                ln = Mid(selText, i, nlPos - i)
-                result += "' " + ln + Chr(10)
+                result += "' " + Mid(selText, i, nlPos - i) + Chr(10)
                 i = nlPos + 1
             Else
-                ln = Mid(selText, i)
-                result += "' " + ln
-                i = Len(selText) + 1
+                result += "' " + Mid(selText, i)
+                Exit Do
             End If
-        Loop While i <= Len(selText)
+        Loop
         Pasteeditor(giEditor, result)
     End If
     CheckEditorModified()
+    gHighlightDirty = -1
 End Sub
 
 Sub DoUncommentBlock()
@@ -1349,7 +1449,8 @@ Sub DoUncommentBlock()
         ' Uncomment each selected line
         Dim As String result = ""
         Dim As Long i = 1
-        Do
+        Dim As Long selLen = Len(selText)
+        Do While i <= selLen
             Dim As Long nlPos = InStr(i, selText, Chr(10))
             Dim As String ln
             If nlPos > 0 Then
@@ -1366,12 +1467,17 @@ Sub DoUncommentBlock()
                 ln = Left(ln, cPos - 1) + Mid(ln, cPos + 1)
             End If
             result += ln
-            If nlPos > 0 Then result += Chr(10)
-            i = IIf(nlPos > 0, nlPos + 1, Len(selText) + 1)
-        Loop While i <= Len(selText)
+            If nlPos > 0 Then
+                result += Chr(10)
+                i = nlPos + 1
+            Else
+                Exit Do
+            End If
+        Loop
         Pasteeditor(giEditor, result)
     End If
     CheckEditorModified()
+    gHighlightDirty = -1
 End Sub
 
 ' Toggle comment: if line starts with ' → uncomment, else comment
@@ -1613,9 +1719,17 @@ Sub DoBuild(runAfter As Integer = 0)
     Dim As String compOut, ln
     Dim As Long ff = FreeFile
     Open Pipe cmdLine + " 2>&1" For Input As #ff
+    Dim As Long lineTick = 0
     Do Until Eof(ff)
         Line Input #ff, ln
         compOut += ln + Chr(10)
+        ' Keep the UI responsive — pump GTK events every few lines
+        lineTick += 1
+        If (lineTick And 15) = 0 Then
+            While gtk_events_pending()
+                gtk_main_iteration_do(0)
+            Wend
+        End If
     Loop
     Close #ff
 
@@ -1756,6 +1870,97 @@ Sub CloseBuildOptions()
         Close_window(hBuildOptWin)
         hBuildOptWin = 0
     End If
+End Sub
+
+' ============================================================
+' Preferences Dialog
+' ============================================================
+Sub ClosePreferences()
+    If hPrefWin <> 0 Then
+        Close_window(hPrefWin)
+        hPrefWin = 0
+    End If
+End Sub
+
+Sub ApplyPreferences()
+    If hPrefWin = 0 Then Return
+    gSettings.TabWidth = Val(Getgadgettext(giPrefTabWidth))
+    If gSettings.TabWidth < 1 Then gSettings.TabWidth = 1
+    If gSettings.TabWidth > 16 Then gSettings.TabWidth = 16
+
+    Dim As Integer newDark = IIf(Getgadgetstate(giPrefDarkTheme), -1, 0)
+    Dim As Integer newWrap = Getgadgetstate(giPrefWordWrap)
+    gAutoIndent = IIf(Getgadgetstate(giPrefAutoIndent), -1, 0)
+
+    Dim As String newFontName = Trim(Getgadgettext(giPrefFontName))
+    Dim As Long newFontSize = Val(Getgadgettext(giPrefFontSize))
+    If newFontSize < 6 Then newFontSize = 6
+    If newFontSize > 72 Then newFontSize = 72
+
+    Settabstopseditor(giEditor, gSettings.TabWidth * 8)
+
+    If newDark <> gSettings.DarkTheme Then
+        gSettings.DarkTheme = newDark
+        ApplyTheme()
+        ResetCurLineTag()
+        ResetBracketTag()
+    End If
+
+    If (newWrap <> 0) <> (gWordWrap <> 0) Then
+        ToggleWordWrap()
+    End If
+
+    If (Len(newFontName) > 0 AndAlso newFontName <> gFontName) OrElse newFontSize <> gFontSize Then
+        If Len(newFontName) > 0 Then gFontName = newFontName
+        SetEditorFontSize(newFontSize)
+    End If
+
+    SaveSettings()
+    ClosePreferences()
+    SetStatusText("Preferences saved")
+End Sub
+
+Sub ShowPreferences()
+    If hPrefWin <> 0 Then
+        Hidewindow(hPrefWin, 0)
+        Return
+    End If
+
+    hPrefWin = Openwindow("Preferences", 200, 150, 420, 340, _
+                          WS_OVERLAPPEDWINDOW Or WS_VISIBLE, 0, 0, hWin)
+    Usegadgetlist(hPrefWin)
+
+    Dim As Long yy = 10
+
+    Textgadget(0, 10, yy, 120, 22, "Tab Width:")
+    Stringgadget(giPrefTabWidth, 140, yy - 2, 80, 26, Str(gSettings.TabWidth))
+    yy += 34
+
+    Textgadget(0, 10, yy, 120, 22, "Editor Font:")
+    Dim As String fnDisplay = gFontName
+    If Len(fnDisplay) = 0 Then fnDisplay = "Monospace"
+    Stringgadget(giPrefFontName, 140, yy - 2, 180, 26, fnDisplay)
+    Stringgadget(giPrefFontSize, 325, yy - 2, 60, 26, Str(gFontSize))
+    yy += 34
+
+    Checkboxgadget(giPrefDarkTheme, 140, yy, 240, 24, "Dark theme")
+    If gSettings.DarkTheme Then Setgadgetstate(giPrefDarkTheme, 1)
+    yy += 28
+
+    Checkboxgadget(giPrefWordWrap, 140, yy, 240, 24, "Word wrap")
+    If gWordWrap Then Setgadgetstate(giPrefWordWrap, 1)
+    yy += 28
+
+    Checkboxgadget(giPrefAutoIndent, 140, yy, 240, 24, "Auto-indent on Enter")
+    If gAutoIndent Then Setgadgetstate(giPrefAutoIndent, 1)
+    yy += 28
+
+    Checkboxgadget(giPrefShowLineNums, 140, yy, 240, 24, "Show line numbers (restart required)")
+    If gSettings.ShowLineNumbers Then Setgadgetstate(giPrefShowLineNums, 1)
+    yy += 40
+
+    Buttongadget(giPrefOK, 210, yy, 90, 30, "OK")
+    Buttongadget(giPrefCancel, 305, yy, 90, 30, "Cancel")
 End Sub
 
 ' ============================================================
@@ -2017,26 +2222,53 @@ Sub SetEditorFontSize(newSize As Long)
 End Sub
 
 Sub SaveAllModified()
+    ' Capture any unsaved edits in the currently active editor first
+    SyncFileFromEditor()
+
+    Dim As Long savedCount = 0
     Dim As Long savedActive = gActiveFile
+    Dim As Long needsSaveAs = -1
+
     For i As Long = 0 To gFileCount - 1
         If gFiles(i).IsModified Then
-            gActiveFile = i
-            SyncEditorToFile()  ' Load back from editor if it was current
-            If gFiles(i).IsNew = 0 Then
+            If gFiles(i).IsNew Then
+                ' New untitled file — must round-trip through active-file Save As
+                If needsSaveAs < 0 Then needsSaveAs = i
+            Else
                 Dim As Long ff = FreeFile
                 If Open(gFiles(i).FilePath For Output As #ff) = 0 Then
                     Print #ff, gFiles(i).Content;
                     Close #ff
                     gFiles(i).IsModified = 0
+                    savedCount += 1
                 End If
             End If
         End If
     Next
-    gActiveFile = savedActive
-    SyncEditorToFile()
+
+    ' Handle the first unsaved new file via Save-As on the active file
+    If needsSaveAs >= 0 Then
+        gActiveFile = needsSaveAs
+        SyncEditorToFile()
+        DoSaveFileAs()
+        gActiveFile = savedActive
+        SyncEditorToFile()
+    End If
+
+    ' Clear the editor modify flag if the active file was saved
+    If savedActive >= 0 AndAlso savedActive < gFileCount AndAlso _
+       gFiles(savedActive).IsModified = 0 Then
+        Setmodifyeditor(giEditor, 0)
+    End If
+
     UpdateFileCombo()
     UpdateTitle()
-    SetStatusText("All files saved")
+    UpdateProjectTree()
+    If savedCount > 0 Then
+        SetStatusText("Saved " + Str(savedCount) + " file(s)")
+    Else
+        SetStatusText("No changes to save")
+    End If
 End Sub
 
 ' Drag & Drop callback
@@ -2176,6 +2408,390 @@ Sub SetStatusText(txt As String)
 End Sub
 
 ' ============================================================
+' Session Save / Restore
+' ============================================================
+Sub SaveSession()
+    If w9isDirExists(gConfigPath) = 0 Then Createdir(gConfigPath)
+    Dim As String sPath = gConfigPath + "/session.txt"
+    Dim As Long ff = FreeFile
+    If Open(sPath For Output As #ff) <> 0 Then Return
+    Print #ff, "active=" & gActiveFile
+    For i As Long = 0 To gFileCount - 1
+        ' Only save real (saved) file paths, not untitled buffers
+        If gFiles(i).IsNew = 0 AndAlso Len(gFiles(i).FilePath) > 0 Then
+            Print #ff, "file=" & gFiles(i).FilePath
+        End If
+    Next
+    Close #ff
+End Sub
+
+Sub LoadSession()
+    Dim As String sPath = gConfigPath + "/session.txt"
+    If w9isFileExists(sPath) = 0 Then Return
+    Dim As Long ff = FreeFile
+    If Open(sPath For Input As #ff) <> 0 Then Return
+
+    Dim As Long activeIdx = -1
+    Do Until Eof(ff)
+        Dim As String ln
+        Line Input #ff, ln
+        ln = Trim(ln)
+        If Left(ln, 7) = "active=" Then
+            activeIdx = Val(Mid(ln, 8))
+        ElseIf Left(ln, 5) = "file=" Then
+            Dim As String fp = Mid(ln, 6)
+            If w9isFileExists(fp) Then DoOpenFilePath(fp)
+        End If
+    Loop
+    Close #ff
+
+    If activeIdx >= 0 AndAlso activeIdx < gFileCount Then
+        SwitchToFile(activeIdx)
+    End If
+End Sub
+
+' ============================================================
+' Editor Clipboard, Undo/Redo, Indent/Unindent
+' ============================================================
+Private Function GetEditorBuffer() As GtkTextBuffer Ptr
+    Dim As GtkWidget Ptr tv = Cast(GtkWidget Ptr, Gadgetid(giEditor))
+    If tv = 0 Then Return 0
+    Return gtk_text_view_get_buffer(GTK_TEXT_VIEW(tv))
+End Function
+
+Private Function GetSystemClipboard() As GtkClipboard Ptr
+    Dim As GtkWidget Ptr tv = Cast(GtkWidget Ptr, Gadgetid(giEditor))
+    If tv = 0 Then Return 0
+    Return gtk_widget_get_clipboard(tv, GDK_SELECTION_CLIPBOARD)
+End Function
+
+Sub DoEditorCut()
+    Dim As GtkTextBuffer Ptr buf = GetEditorBuffer()
+    Dim As GtkClipboard Ptr cb = GetSystemClipboard()
+    If buf = 0 OrElse cb = 0 Then Return
+    gtk_text_buffer_cut_clipboard(buf, cb, -1)
+    CheckEditorModified()
+    gHighlightDirty = -1
+End Sub
+
+Sub DoEditorCopy()
+    Dim As GtkTextBuffer Ptr buf = GetEditorBuffer()
+    Dim As GtkClipboard Ptr cb = GetSystemClipboard()
+    If buf = 0 OrElse cb = 0 Then Return
+    gtk_text_buffer_copy_clipboard(buf, cb)
+End Sub
+
+Sub DoEditorPaste()
+    Dim As GtkTextBuffer Ptr buf = GetEditorBuffer()
+    Dim As GtkClipboard Ptr cb = GetSystemClipboard()
+    If buf = 0 OrElse cb = 0 Then Return
+    gtk_text_buffer_paste_clipboard(buf, cb, 0, -1)
+    CheckEditorModified()
+    gHighlightDirty = -1
+End Sub
+
+Sub DoEditorSelectAll()
+    Dim As GtkTextBuffer Ptr buf = GetEditorBuffer()
+    If buf = 0 Then Return
+    Dim As GtkTextIter startIter, endIter
+    gtk_text_buffer_get_start_iter(buf, @startIter)
+    gtk_text_buffer_get_end_iter(buf, @endIter)
+    gtk_text_buffer_select_range(buf, @startIter, @endIter)
+End Sub
+
+' Undo/Redo: GtkTextView itself has no undo; we drive the built-in
+' key handler via gtk_bindings by pushing a GDK key event for Ctrl+Z/Ctrl+Y.
+' For a portable fallback, simulate via gdk_event_put. Here we just
+' focus the editor so the user's own Ctrl+Z still works natively via
+' any installed input-method/key-binding. In practice, GTK2 GtkTextView
+' does not have native undo, so these stubs show a hint instead.
+Sub DoEditorUndo()
+    SetStatusText("Undo: GtkTextView has no native undo. Use edits carefully.")
+End Sub
+
+Sub DoEditorRedo()
+    SetStatusText("Redo: GtkTextView has no native redo.")
+End Sub
+
+' Indent or unindent the current line or selection by one tab-width
+Sub DoIndentSelection(unindent As Integer)
+    Dim As String indentUnit = Space(gSettings.TabWidth)
+
+    Dim As String selText = Getselecttexteditorgadget(giEditor)
+    Dim As Long curIdx = Getcurrentindexchareditor(giEditor)
+
+    If Len(selText) = 0 Then
+        ' Single line: indent/unindent current line
+        Dim As Long ln = Linefromchareditor(giEditor, curIdx)
+        Dim As Long lineStart = Lineindexeditor(giEditor, ln)
+        If unindent Then
+            Dim As String curLine = Getlinetexteditor(giEditor, ln)
+            Dim As Long toRemove = 0
+            If Left(curLine, gSettings.TabWidth) = indentUnit Then
+                toRemove = gSettings.TabWidth
+            ElseIf Left(curLine, 1) = Chr(9) Then
+                toRemove = 1
+            ElseIf Left(curLine, 1) = " " Then
+                ' Remove up to tab-width leading spaces
+                Dim As Long i = 1
+                While i <= Len(curLine) AndAlso i <= gSettings.TabWidth AndAlso Mid(curLine, i, 1) = " "
+                    i += 1
+                Wend
+                toRemove = i - 1
+            End If
+            If toRemove > 0 Then
+                Setselecttexteditorgadget(giEditor, lineStart, lineStart + toRemove)
+                Pasteeditor(giEditor, "")
+            End If
+        Else
+            Setselecttexteditorgadget(giEditor, lineStart, lineStart)
+            Pasteeditor(giEditor, indentUnit)
+        End If
+    Else
+        ' Multi-line: operate on each selected line
+        Dim As Long selEndIdx = curIdx
+        Dim As Long selStartIdx = curIdx - Len(selText)
+        If selStartIdx < 0 Then selStartIdx = 0
+
+        Dim As Long lnStart = Linefromchareditor(giEditor, selStartIdx)
+        Dim As Long lnEnd = Linefromchareditor(giEditor, selEndIdx)
+        ' If selection ends exactly at start of a line, don't include that line
+        If lnEnd > lnStart AndAlso selEndIdx = Lineindexeditor(giEditor, lnEnd) Then
+            lnEnd -= 1
+        End If
+
+        Dim As String result = ""
+        For ln As Long = lnStart To lnEnd
+            Dim As String curLine = Getlinetexteditor(giEditor, ln)
+            If unindent Then
+                If Left(curLine, gSettings.TabWidth) = indentUnit Then
+                    curLine = Mid(curLine, gSettings.TabWidth + 1)
+                ElseIf Left(curLine, 1) = Chr(9) Then
+                    curLine = Mid(curLine, 2)
+                ElseIf Left(curLine, 1) = " " Then
+                    Dim As Long i = 1
+                    While i <= Len(curLine) AndAlso i <= gSettings.TabWidth AndAlso Mid(curLine, i, 1) = " "
+                        i += 1
+                    Wend
+                    curLine = Mid(curLine, i)
+                End If
+            Else
+                curLine = indentUnit + curLine
+            End If
+            result += curLine
+            If ln < lnEnd Then result += Chr(10)
+        Next
+
+        Dim As Long blockStart = Lineindexeditor(giEditor, lnStart)
+        Dim As Long blockEnd = Lineindexeditor(giEditor, lnEnd) + Linelengtheditor(giEditor, lnEnd)
+        Setselecttexteditorgadget(giEditor, blockStart, blockEnd)
+        Pasteeditor(giEditor, result)
+        ' Re-select the modified block
+        Setselecttexteditorgadget(giEditor, blockStart, blockStart + Len(result))
+    End If
+    CheckEditorModified()
+    gHighlightDirty = -1
+End Sub
+
+' Current line highlight: applied via a GtkTextBuffer tag, refreshed on cursor moves
+Const TAG_CUR_LINE = "fbe_curline"
+Dim Shared gCurLineTagDone As Integer = 0
+Dim Shared gLastHlLine As Long = -1
+
+Sub UpdateCurrentLineHighlight()
+    Dim As GtkTextBuffer Ptr buf = GetEditorBuffer()
+    If buf = 0 Then Return
+
+    ' Create the background tag lazily
+    If gCurLineTagDone = 0 Then
+        If gSettings.DarkTheme Then
+            gtk_text_buffer_create_tag(buf, TAG_CUR_LINE, "paragraph-background", "#2C313C", NULL)
+        Else
+            gtk_text_buffer_create_tag(buf, TAG_CUR_LINE, "paragraph-background", "#F5F5E8", NULL)
+        End If
+        gCurLineTagDone = -1
+    End If
+
+    ' Find current line
+    Dim As GtkTextIter curIter
+    Dim As GtkTextMark Ptr insertMark = gtk_text_buffer_get_insert(buf)
+    gtk_text_buffer_get_iter_at_mark(buf, @curIter, insertMark)
+    Dim As Long curLine = gtk_text_iter_get_line(@curIter)
+
+    If curLine = gLastHlLine Then Return
+
+    ' Remove tag from previous line
+    If gLastHlLine >= 0 Then
+        Dim As Long totalLines = gtk_text_buffer_get_line_count(buf)
+        If gLastHlLine < totalLines Then
+            Dim As GtkTextIter oldStart, oldEnd
+            gtk_text_buffer_get_iter_at_line(buf, @oldStart, gLastHlLine)
+            oldEnd = oldStart
+            If gtk_text_iter_forward_line(@oldEnd) = 0 Then
+                gtk_text_buffer_get_end_iter(buf, @oldEnd)
+            End If
+            gtk_text_buffer_remove_tag_by_name(buf, TAG_CUR_LINE, @oldStart, @oldEnd)
+        End If
+    End If
+
+    ' Apply to current line
+    Dim As GtkTextIter hlStart, hlEnd
+    gtk_text_buffer_get_iter_at_line(buf, @hlStart, curLine)
+    hlEnd = hlStart
+    If gtk_text_iter_forward_line(@hlEnd) = 0 Then
+        gtk_text_buffer_get_end_iter(buf, @hlEnd)
+    End If
+    gtk_text_buffer_apply_tag_by_name(buf, TAG_CUR_LINE, @hlStart, @hlEnd)
+    gLastHlLine = curLine
+End Sub
+
+' Refresh the current line tag color after theme change
+Sub ResetCurLineTag()
+    Dim As GtkTextBuffer Ptr buf = GetEditorBuffer()
+    If buf Then
+        Dim As GtkTextTagTable Ptr tt = gtk_text_buffer_get_tag_table(buf)
+        Dim As GtkTextTag Ptr tag = gtk_text_tag_table_lookup(tt, TAG_CUR_LINE)
+        If tag Then gtk_text_tag_table_remove(tt, tag)
+    End If
+    gCurLineTagDone = 0
+    gLastHlLine = -1
+End Sub
+
+' Insert/Overwrite mode indicator
+Sub ToggleInsertOverwrite()
+    gOvertype = IIf(gOvertype, 0, -1)
+    Dim As GtkWidget Ptr tv = Cast(GtkWidget Ptr, Gadgetid(giEditor))
+    If tv Then gtk_text_view_set_overwrite(GTK_TEXT_VIEW(tv), gOvertype)
+    gStatusDirty = -1
+End Sub
+
+' Bracket matching: highlight matching bracket at/near cursor
+Const TAG_BRACKET = "fbe_bracket"
+Dim Shared gBracketTagDone As Integer = 0
+Dim Shared gLastBracketPos1 As Long = -1
+Dim Shared gLastBracketPos2 As Long = -1
+
+Private Function MatchingBracket(ch As Long, ByRef dirOut As Long) As Long
+    Select Case ch
+    Case Asc("(") : dirOut = 1  : Return Asc(")")
+    Case Asc("[") : dirOut = 1  : Return Asc("]")
+    Case Asc("{") : dirOut = 1  : Return Asc("}")
+    Case Asc(")") : dirOut = -1 : Return Asc("(")
+    Case Asc("]") : dirOut = -1 : Return Asc("[")
+    Case Asc("}") : dirOut = -1 : Return Asc("{")
+    End Select
+    dirOut = 0
+    Return 0
+End Function
+
+Sub UpdateBracketMatch()
+    Dim As GtkTextBuffer Ptr buf = GetEditorBuffer()
+    If buf = 0 Then Return
+
+    ' Lazy-create tag
+    If gBracketTagDone = 0 Then
+        If gSettings.DarkTheme Then
+            gtk_text_buffer_create_tag(buf, TAG_BRACKET, _
+                "background", "#3E4452", "foreground", "#E5C07B", "weight", Cast(Any Ptr, 700), NULL)
+        Else
+            gtk_text_buffer_create_tag(buf, TAG_BRACKET, _
+                "background", "#FFEEAA", "weight", Cast(Any Ptr, 700), NULL)
+        End If
+        gBracketTagDone = -1
+    End If
+
+    ' Clear previous highlights
+    If gLastBracketPos1 >= 0 Then
+        Dim As GtkTextIter cs, ce
+        gtk_text_buffer_get_iter_at_offset(buf, @cs, gLastBracketPos1)
+        gtk_text_buffer_get_iter_at_offset(buf, @ce, gLastBracketPos1 + 1)
+        gtk_text_buffer_remove_tag_by_name(buf, TAG_BRACKET, @cs, @ce)
+        gLastBracketPos1 = -1
+    End If
+    If gLastBracketPos2 >= 0 Then
+        Dim As GtkTextIter cs, ce
+        gtk_text_buffer_get_iter_at_offset(buf, @cs, gLastBracketPos2)
+        gtk_text_buffer_get_iter_at_offset(buf, @ce, gLastBracketPos2 + 1)
+        gtk_text_buffer_remove_tag_by_name(buf, TAG_BRACKET, @cs, @ce)
+        gLastBracketPos2 = -1
+    End If
+
+    ' Find bracket at or just before cursor
+    Dim As Long curIdx = Getcurrentindexchareditor(giEditor)
+    Dim As String edText = Getgadgettext(giEditor)
+    Dim As Long tLen = Len(edText)
+    If tLen = 0 Then Return
+
+    Dim As Long bracketPos = -1
+    Dim As Long dirTmp = 0
+    If curIdx < tLen Then
+        Dim As Long c = edText[curIdx]
+        If MatchingBracket(c, dirTmp) Then bracketPos = curIdx
+    End If
+    If bracketPos < 0 AndAlso curIdx > 0 Then
+        Dim As Long c = edText[curIdx - 1]
+        If MatchingBracket(c, dirTmp) Then bracketPos = curIdx - 1
+    End If
+
+    If bracketPos < 0 Then Return
+
+    ' Scan in direction to find match, respecting nesting, skipping strings/comments
+    Dim As Long openCh = edText[bracketPos]
+    Dim As Long scanDir = 0
+    Dim As Long closeCh = MatchingBracket(openCh, scanDir)
+    Dim As Long depth = 1
+    Dim As Long scanPos = bracketPos + scanDir
+    Dim As Integer inString = 0
+
+    Do While scanPos >= 0 AndAlso scanPos < tLen
+        Dim As Long ch = edText[scanPos]
+        If ch = Asc("""") Then
+            inString = Not inString
+        ElseIf inString = 0 Then
+            If ch = Asc("'") Then
+                ' Comment to end of line — skip remainder of line when scanning forward;
+                ' when scanning backward, just skip this character
+                If scanDir > 0 Then
+                    Dim As Long eol = InStr(scanPos + 1, edText, Chr(10))
+                    If eol = 0 Then Return
+                    scanPos = eol
+                End If
+            ElseIf ch = openCh Then
+                depth += 1
+            ElseIf ch = closeCh Then
+                depth -= 1
+                If depth = 0 Then
+                    ' Found match — apply tag to both positions
+                    Dim As GtkTextIter s1, e1, s2, e2
+                    gtk_text_buffer_get_iter_at_offset(buf, @s1, bracketPos)
+                    gtk_text_buffer_get_iter_at_offset(buf, @e1, bracketPos + 1)
+                    gtk_text_buffer_apply_tag_by_name(buf, TAG_BRACKET, @s1, @e1)
+                    gtk_text_buffer_get_iter_at_offset(buf, @s2, scanPos)
+                    gtk_text_buffer_get_iter_at_offset(buf, @e2, scanPos + 1)
+                    gtk_text_buffer_apply_tag_by_name(buf, TAG_BRACKET, @s2, @e2)
+                    gLastBracketPos1 = bracketPos
+                    gLastBracketPos2 = scanPos
+                    Return
+                End If
+            End If
+        End If
+        scanPos += scanDir
+    Loop
+End Sub
+
+Sub ResetBracketTag()
+    Dim As GtkTextBuffer Ptr buf = GetEditorBuffer()
+    If buf Then
+        Dim As GtkTextTagTable Ptr tt = gtk_text_buffer_get_tag_table(buf)
+        Dim As GtkTextTag Ptr tag = gtk_text_tag_table_lookup(tt, TAG_BRACKET)
+        If tag Then gtk_text_tag_table_remove(tt, tag)
+    End If
+    gBracketTagDone = 0
+    gLastBracketPos1 = -1
+    gLastBracketPos2 = -1
+End Sub
+
+' ============================================================
 ' Main Entry Point
 ' ============================================================
 ' Read startup file from /proc/self/cmdline (gtk_init eats Command())
@@ -2202,8 +2818,9 @@ CreateToolbarUI()
 CreateLayout()
 ApplyTheme()
 
-' Always start with a new file, then open command-line file after
-DoNewFile()
+' Restore previous session (open files) — if none, start fresh with Untitled.bas
+LoadSession()
+If gFileCount = 0 Then DoNewFile()
 SetStatusText("Ready - FBC: " + IIf(Len(gBuild.FBCPath) > 0, gBuild.FBCPath, "(not set)"))
 UpdateInfoXserver()
 
@@ -2244,6 +2861,8 @@ Do
             HighlightCurrentLine(giEditor)
             gHighlightDirty = 0
         End If
+        UpdateCurrentLineHighlight()
+        UpdateBracketMatch()
         Sleepw9(2)  ' ~2ms idle sleep
         Continue Do
     End If
@@ -2258,6 +2877,8 @@ Do
             HideAutoComplete()
         ElseIf hBuildOptWin <> 0 AndAlso Eventhwnd() = hBuildOptWin Then
             CloseBuildOptions()
+        ElseIf hPrefWin <> 0 AndAlso Eventhwnd() = hPrefWin Then
+            ClosePreferences()
         ElseIf Eventhwnd() = hWin Then
             Dim As Integer canClose = -1
             For i As Long = 0 To gFileCount - 1
@@ -2276,6 +2897,7 @@ Do
                 End If
             Next
             If canClose Then
+                SaveSession()
                 SaveSettings()
                 End
             End If
@@ -2290,7 +2912,27 @@ Do
         Case mnuFileSaveAs  : DoSaveFileAs()
         Case mnuFileSaveAll : SaveAllModified()
         Case mnuFileClose   : DoCloseFile()
-        Case mnuFileExit    : SaveSettings() : End
+        Case mnuFileExit
+            SyncFileFromEditor()
+            ' Prompt for unsaved files
+            Dim As Integer canExit = -1
+            For ei As Long = 0 To gFileCount - 1
+                If gFiles(ei).IsModified Then
+                    Dim As Long ans = Messbox("Unsaved Changes", _
+                        "File '" + gFiles(ei).FileName + "' has unsaved changes." + Chr(10) + _
+                        "Save before exiting?", MB_YESNOCANCEL)
+                    If ans = IDYES Then
+                        gActiveFile = ei : DoSaveFile()
+                    ElseIf ans = IDCANCEL Then
+                        canExit = 0 : Exit For
+                    End If
+                End If
+            Next
+            If canExit Then
+                SaveSession()
+                SaveSettings()
+                End
+            End If
         Case mnuRecentBase To mnuRecentBase + 9
             Dim As Long ri = Eventnumber() - mnuRecentBase
             If ri >= 0 AndAlso ri < gRecentCount Then
@@ -2298,6 +2940,12 @@ Do
             End If
 
         ' Edit
+        Case mnuEditUndo      : DoEditorUndo()
+        Case mnuEditRedo      : DoEditorRedo()
+        Case mnuEditCut       : DoEditorCut()
+        Case mnuEditCopy      : DoEditorCopy()
+        Case mnuEditPaste     : DoEditorPaste()
+        Case mnuEditSelectAll : DoEditorSelectAll()
         Case mnuEditFind      : ShowFindReplace(0)
         Case mnuEditReplace   : ShowFindReplace(-1)
         Case mnuEditGoToLine  : DoGoToLine()
@@ -2306,11 +2954,18 @@ Do
         Case mnuEditSelectLine   : DoSelectLine()
         Case mnuEditDuplicateLine: DoDuplicateLine()
         Case mnuEditDeleteLine   : DoDeleteLine()
+        Case mnuEditMoveLineUp   : DoMoveLineUp()
+        Case mnuEditMoveLineDown : DoMoveLineDown()
+        Case mnuEditIndent       : DoIndentSelection(0)
+        Case mnuEditUnindent     : DoIndentSelection(-1)
+        Case mnuEditInsertMode   : ToggleInsertOverwrite()
 
         ' View
         Case mnuViewDarkTheme
             gSettings.DarkTheme = IIf(gSettings.DarkTheme, 0, -1)
             ApplyTheme()
+            ResetCurLineTag()
+            ResetBracketTag()
             SaveSettings()
         Case mnuViewWordWrap
             ToggleWordWrap()
@@ -2324,6 +2979,8 @@ Do
             SetEditorFontSize(11)
         Case mnuViewRefreshOutline
             RefreshOutline()
+        Case mnuViewPreferences
+            ShowPreferences()
 
         ' Build
         Case mnuBuildCompile    : DoBuild(0)
@@ -2342,12 +2999,39 @@ Do
 
         ' Help
         Case mnuHelpAbout
-            Messbox(APP_NAME, APP_NAME + " " + APP_VERSION + Chr(10) + _
-                    "FreeBASIC IDE for Linux" + Chr(10) + _
-                    "By " + APP_AUTHOR + Chr(10) + Chr(10) + _
-                    "Using Window9 GUI Library" + Chr(10) + _
-                    "FBC: " + gBuild.FBCPath + Chr(10) + _
-                    "GDB: " + gBuild.GDBPath)
+            ' Collect live version info
+            Dim As String fbcVer = "(unknown)"
+            If Len(gBuild.FBCPath) > 0 AndAlso w9isFileExists(gBuild.FBCPath) Then
+                Dim As Long ffv = FreeFile
+                Dim As Long rc = Open Pipe (gBuild.FBCPath + " -version 2>&1" For Input As #ffv)
+                If rc = 0 Then
+                    If Not Eof(ffv) Then Line Input #ffv, fbcVer
+                    Close #ffv
+                End If
+            End If
+            Dim As String gdbVer = "(not installed)"
+            If Len(gBuild.GDBPath) > 0 AndAlso w9isFileExists(gBuild.GDBPath) Then
+                Dim As Long ffv = FreeFile
+                Dim As Long rc = Open Pipe (gBuild.GDBPath + " --version 2>&1" For Input As #ffv)
+                If rc = 0 Then
+                    If Not Eof(ffv) Then Line Input #ffv, gdbVer
+                    Close #ffv
+                End If
+            End If
+            Messbox("About " + APP_NAME, _
+                APP_NAME + " " + APP_VERSION + Chr(10) + _
+                "A FreeBASIC IDE for Linux 64-bit" + Chr(10) + _
+                "Copyright (c) 2026 " + APP_AUTHOR + Chr(10) + Chr(10) + _
+                "Built with FreeBASIC + Window9 (GTK2)" + Chr(10) + _
+                Chr(10) + _
+                "FBC:  " + IIf(Len(gBuild.FBCPath) > 0, gBuild.FBCPath, "(not set)") + Chr(10) + _
+                "      " + fbcVer + Chr(10) + _
+                "GDB:  " + IIf(Len(gBuild.GDBPath) > 0, gBuild.GDBPath, "(not set)") + Chr(10) + _
+                "      " + gdbVer + Chr(10) + _
+                Chr(10) + _
+                "Open files: " + Str(gFileCount) + Chr(10) + _
+                "Recent files: " + Str(gRecentCount) + Chr(10) + _
+                "Config: " + gConfigPath)
 
         ' Keyboard shortcuts
         Case kbNew         : DoNewFile()
@@ -2389,6 +3073,9 @@ Do
         Case kbDuplicateLine : DoDuplicateLine()
         Case kbSaveAll       : SaveAllModified()
         Case kbDeleteLine    : DoDeleteLine()
+        Case kbIndent        : DoIndentSelection(0)
+        Case kbUnindent      : DoIndentSelection(-1)
+        Case kbPreferences   : ShowPreferences()
         End Select
 
     Case Eventgadget
@@ -2416,17 +3103,17 @@ Do
         Case giTbNew     : DoNewFile()
         Case giTbOpen    : DoOpenFile()
         Case giTbSave    : DoSaveFile()
-        Case giTbUndo
-            ' GTK2 GtkTextView doesn't have undo API, emit Ctrl+Z key event
-            SetStatusText("Use Ctrl+Z for Undo")
-        Case giTbRedo
-            SetStatusText("Use Ctrl+Y for Redo")
+        Case giTbUndo    : DoEditorUndo()
+        Case giTbRedo    : DoEditorRedo()
         Case giTbFind    : ShowFindReplace(0)
         Case giTbCompile : DoBuild(0)
         Case giTbRun     : DoBuild(-1)
         ' Build options buttons
         Case giBldOK       : ApplyBuildOptions()
         Case giBldCancel   : CloseBuildOptions()
+        ' Preferences dialog buttons
+        Case giPrefOK      : ApplyPreferences()
+        Case giPrefCancel  : ClosePreferences()
         End Select
 
     Case Eventsize
@@ -2449,8 +3136,13 @@ Do
                 End If
             End If
 
+            ' INS key toggles insert/overwrite mode
+            If key = VK_INSERT AndAlso Eventhwnd() = hWin Then
+                ToggleInsertOverwrite()
+            End If
+
             ' Auto-indent: after Enter, match previous line's indentation
-            If key = VK_RETURN Then
+            If key = VK_RETURN AndAlso gAutoIndent Then
                 ' Wait for GTK to insert the newline first
                 While gtk_events_pending()
                     gtk_main_iteration_do(0)
