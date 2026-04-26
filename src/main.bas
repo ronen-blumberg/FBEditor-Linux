@@ -15,6 +15,13 @@
 Const LINE_NUM_WIDTH = 50  ' Width of line number margin in pixels
 Dim Shared gDarkGutter As Integer = 0  ' Set by ApplyTheme
 
+' Deferred-update flags consumed by the main event loop. Declared up here so
+' the GTK signal callbacks defined below can set them.
+Dim Shared gStatusDirty As Integer = 0
+Dim Shared gModifyDirty As Integer = 0
+Dim Shared gHighlightDirty As Integer = 0
+Dim Shared gCursorDirty As Integer = -1  ' Set on cursor move or text change; gates current-line + bracket updates
+
 ' Callback: draw line numbers in the left border window
 Function LineNumExposeCB Cdecl(widget As GtkWidget Ptr, evnt As GdkEventExpose Ptr, _
                                 userData As gpointer) As gboolean
@@ -84,6 +91,18 @@ Sub LineNumBufferChangedCB Cdecl(buffer As GtkTextBuffer Ptr, userData As gpoint
     Dim As GtkWidget Ptr tv = Cast(GtkWidget Ptr, userData)
     Dim As GdkWindow Ptr leftWin = gtk_text_view_get_window(GTK_TEXT_VIEW(tv), GTK_TEXT_WINDOW_LEFT)
     If leftWin Then gdk_window_invalidate_rect(leftWin, 0, 0)
+    ' Text changed -> bracket positions may shift, recheck on next idle
+    gCursorDirty = -1
+End Sub
+
+' Callback: cursor (insert mark) moved -> request a current-line/bracket refresh
+Sub EditorMarkSetCB Cdecl(buffer As GtkTextBuffer Ptr, location As GtkTextIter Ptr, _
+                          mark As GtkTextMark Ptr, userData As gpointer)
+    ' Only react to the insert mark, not selection-bound or arbitrary marks.
+    ' gtk_text_mark_get_name returns const gchar* (may be NULL for anon marks).
+    Dim As ZString Ptr nm = Cast(ZString Ptr, gtk_text_mark_get_name(mark))
+    If nm = 0 Then Return
+    If *nm = "insert" Then gCursorDirty = -1
 End Sub
 
 ' Setup line numbers on a GtkTextView gadget
@@ -100,6 +119,10 @@ Sub SetupLineNumbers(iGadget As Long)
     ' Redraw line numbers when text changes
     Dim As GtkTextBuffer Ptr buf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(tv))
     g_signal_connect(G_OBJECT(buf), "changed", G_CALLBACK(@LineNumBufferChangedCB), tv)
+
+    ' Track cursor moves so the event loop only refreshes current-line/bracket
+    ' highlighting when the insert mark actually changes (instead of every tick).
+    g_signal_connect(G_OBJECT(buf), "mark-set", G_CALLBACK(@EditorMarkSetCB), 0)
 End Sub
 
 ' ============================================================
@@ -309,9 +332,7 @@ Dim Shared gRecentFiles(MAX_RECENT_FILES - 1) As String
 Dim Shared gRecentCount As Long = 0
 Dim Shared gFindMatchCase As Integer = 0
 Dim Shared gLastFindText As String
-Dim Shared gStatusDirty As Integer = 0  ' Deferred status bar update flag
-Dim Shared gModifyDirty As Integer = 0  ' Deferred modify check flag
-Dim Shared gHighlightDirty As Integer = 0  ' Deferred syntax highlight flag
+' (gStatusDirty / gModifyDirty / gHighlightDirty / gCursorDirty declared near top — used by GTK callbacks)
 Dim Shared gWordWrap As Integer = 0
 Dim Shared gAutoIndent As Integer = -1
 Dim Shared gFontSize As Long = 11
@@ -896,33 +917,43 @@ End Sub
 
 Sub ResizeInternalGadgets()
     Static As Integer inResize = 0
+    Static As Long lastContW = -1, lastContH = -1
+    Static As Long lastOutW = -1, lastOutH = -1
     If inResize Then Return
     inResize = -1
 
-    ' Resize editor container children to fill the container
+    ' Resize editor container children only when the container size has actually
+    ' changed. GTK can fire size-allocate continuously even when nothing changed,
+    ' so skipping this is the dominant idle-CPU win.
     Dim As Long contW = Gadgetwidth(giEditorContainer)
     Dim As Long contH = Gadgetheight(giEditorContainer)
-    If contW > 10 AndAlso contH > 30 Then
+    If (contW <> lastContW OrElse contH <> lastContH) AndAlso contW > 10 AndAlso contH > 30 Then
         Resizegadget(giCboFiles, 0, 0, contW, 28)
         Resizegadget(giEditor, 0, 28, contW, contH - 28)
+        lastContW = contW : lastContH = contH
     End If
 
-    ' Resize output text to fill the tab panel
+    ' Resize output text to fill the tab panel (only when changed)
     Dim As Long outW = Gadgetwidth(giTabOutput)
     Dim As Long outH = Gadgetheight(giTabOutput)
-    If outW > 10 AndAlso outH > 30 Then
+    If (outW <> lastOutW OrElse outH <> lastOutH) AndAlso outW > 10 AndAlso outH > 30 Then
         Resizegadget(giTxtOutput, 0, 0, outW, outH - 30)
         Resizegadget(giTxtDebugOutput, 0, 0, outW, outH - 56)
         Resizegadget(giTxtGDBCmd, 0, outH - 56, outW, 26)
+        lastOutW = outW : lastOutH = outH
     End If
 
     inResize = 0
 End Sub
 
 Sub HandleResize()
+    Static As Long lastWinW = -1, lastWinH = -1
     Dim As Long winW = Windowclientwidth(hWin)
     Dim As Long winH = Windowclientheight(hWin)
-    Resizegadget(giSplitMain, 0, 60, winW, winH - 84)
+    If winW <> lastWinW OrElse winH <> lastWinH Then
+        Resizegadget(giSplitMain, 0, 60, winW, winH - 84)
+        lastWinW = winW : lastWinH = winH
+    End If
     ResizeInternalGadgets()
 End Sub
 
@@ -2716,24 +2747,32 @@ Sub UpdateBracketMatch()
         gLastBracketPos2 = -1
     End If
 
-    ' Find bracket at or just before cursor
-    Dim As Long curIdx = Getcurrentindexchareditor(giEditor)
-    Dim As String edText = Getgadgettext(giEditor)
-    Dim As Long tLen = Len(edText)
-    If tLen = 0 Then Return
+    ' Peek the chars at/before the cursor first using GTK iters — cheap.
+    ' Only pull the entire buffer text (expensive) if a bracket is actually there.
+    Dim As GtkTextIter curIter
+    Dim As GtkTextMark Ptr insMark = gtk_text_buffer_get_insert(buf)
+    gtk_text_buffer_get_iter_at_mark(buf, @curIter, insMark)
+    Dim As Long curIdx = gtk_text_iter_get_offset(@curIter)
 
     Dim As Long bracketPos = -1
     Dim As Long dirTmp = 0
-    If curIdx < tLen Then
-        Dim As Long c = edText[curIdx]
-        If MatchingBracket(c, dirTmp) Then bracketPos = curIdx
-    End If
-    If bracketPos < 0 AndAlso curIdx > 0 Then
-        Dim As Long c = edText[curIdx - 1]
-        If MatchingBracket(c, dirTmp) Then bracketPos = curIdx - 1
+    Dim As Long peekCh = gtk_text_iter_get_char(@curIter)
+    If peekCh <> 0 AndAlso MatchingBracket(peekCh, dirTmp) Then
+        bracketPos = curIdx
+    ElseIf curIdx > 0 Then
+        Dim As GtkTextIter prevIter = curIter
+        If gtk_text_iter_backward_char(@prevIter) Then
+            peekCh = gtk_text_iter_get_char(@prevIter)
+            If MatchingBracket(peekCh, dirTmp) Then bracketPos = curIdx - 1
+        End If
     End If
 
     If bracketPos < 0 Then Return
+
+    ' Bracket found — now fetch buffer text once for the matching scan.
+    Dim As String edText = Getgadgettext(giEditor)
+    Dim As Long tLen = Len(edText)
+    If tLen = 0 Then Return
 
     ' Scan in direction to find match, respecting nesting, skipping strings/comments
     Dim As Long openCh = edText[bracketPos]
@@ -2861,9 +2900,19 @@ Do
             HighlightCurrentLine(giEditor)
             gHighlightDirty = 0
         End If
-        UpdateCurrentLineHighlight()
-        UpdateBracketMatch()
-        Sleepw9(2)  ' ~2ms idle sleep
+        ' Only refresh current-line + bracket highlight when the cursor actually
+        ' moved (or text changed) — driven by mark-set / changed signals on the
+        ' editor buffer. This avoids running these on every idle tick, which
+        ' was the main source of background CPU usage.
+        If gCursorDirty Then
+            UpdateCurrentLineHighlight()
+            UpdateBracketMatch()
+            gCursorDirty = 0
+        End If
+        ' Idle yield: ~16ms = ~60Hz UI tick. Note Sleepw9(n) sleeps 1ms every
+        ' nth call, so we use FB's native Sleep here for a true millisecond
+        ' delay. This is the dominant CPU saver — old loop spun ~500x/sec.
+        Sleep 16, 1
         Continue Do
     End If
 
